@@ -239,6 +239,24 @@ export interface NavigationHistoryState {
 }
 
 /**
+ * Project-level Claude execution environment.
+ *
+ * Only meaningful on Windows hosts and only for the `claude-code` provider.
+ * `mode` selects whether Claude Code is launched against the Windows-native
+ * binary or invoked through `wsl.exe` against a Linux-side install. `distro`
+ * is reserved for future per-project distro selection — ignored in v1, where
+ * we always use the default WSL distro.
+ *
+ * Stored as an object (not a bare string) so the schema has room for the
+ * future distro field without a migration. Leaving `mode` undefined preserves
+ * existing Windows-native behavior.
+ */
+export interface ClaudeExecutionEnvironment {
+  mode: 'windows' | 'wsl';
+  distro?: string;
+}
+
+/**
  * Per-provider override settings for project-level configuration.
  * Values of `undefined` mean "inherit from global settings".
  * Explicit values override the global setting.
@@ -252,6 +270,11 @@ export interface ProviderOverride {
   defaultModel?: string;
   /** Project-specific API key (optional, overrides global key) */
   apiKey?: string;
+  /**
+   * Claude Code execution environment override (Windows-only, claude-code provider only).
+   * Ignored on non-Windows hosts and for non-claude-code providers.
+   */
+  executionEnvironment?: ClaudeExecutionEnvironment;
 }
 
 /**

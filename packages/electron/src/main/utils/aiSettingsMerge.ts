@@ -6,7 +6,7 @@
  * undefined/null in project settings means "inherit from global".
  */
 
-import { AIProviderOverrides, ProviderOverride, getAIProviderOverrides } from './store';
+import { AIProviderOverrides, ClaudeExecutionEnvironment, ProviderOverride, getAIProviderOverrides } from './store';
 
 /**
  * Global AI settings structure (from ai-settings electron-store)
@@ -263,4 +263,21 @@ export function getEnabledProviders(
   return Object.entries(effective.providerSettings)
     .filter(([_, settings]) => settings.enabled)
     .map(([id]) => id);
+}
+
+/**
+ * Resolve the project-level Claude execution environment override.
+ *
+ * Returns the override only when set; callers default to Windows-native when
+ * undefined. Returns undefined on non-Windows hosts so callers don't have to
+ * branch on platform.
+ */
+export function getClaudeExecutionEnvironment(
+  workspacePath?: string
+): ClaudeExecutionEnvironment | undefined {
+  if (!workspacePath || process.platform !== 'win32') {
+    return undefined;
+  }
+  const overrides = getAIProviderOverrides(workspacePath);
+  return overrides?.providers?.['claude-code']?.executionEnvironment;
 }

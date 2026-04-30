@@ -287,6 +287,10 @@
         "to": "trayTemplate@2x.png"
       },
       {
+        "from": "resources/wsl-claude-launcher.cmd",
+        "to": "app.asar.unpacked/resources/wsl-claude-launcher.cmd"
+      },
+      {
         "from": "../extensions",
         "to": "extensions",
         "filter": [

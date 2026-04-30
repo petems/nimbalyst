@@ -90,7 +90,7 @@ import {
   handleToolPermissionFallback as handleToolPermissionFallbackHelper,
   handleToolPermissionWithService as handleToolPermissionWithServiceHelper,
 } from './claudeCode/toolAuthorization';
-import { ClaudeCodeDeps } from './claudeCode/dependencyInjection';
+import { ClaudeCodeDeps, type ClaudeExecutionResolver } from './claudeCode/dependencyInjection';
 import { buildSdkOptions } from './claudeCode/sdkOptionsBuilder';
 
 
@@ -213,6 +213,8 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
   // These forwarding setters maintain backward compatibility for callers.
 
   public static setCustomClaudeCodePathLoader(loader: (() => string) | null): void { ClaudeCodeDeps.setCustomClaudeCodePathLoader(loader); }
+
+  public static setClaudeExecutionResolver(resolver: ClaudeExecutionResolver | null): void { ClaudeCodeDeps.setClaudeExecutionResolver(resolver); }
 
   constructor() {
     super();
@@ -2703,3 +2705,5 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
     }
   }
 }
+
+export type { ClaudeExecutionResolution, ClaudeExecutionResolver } from './claudeCode/dependencyInjection';

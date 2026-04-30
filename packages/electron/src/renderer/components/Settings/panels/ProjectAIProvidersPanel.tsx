@@ -1,11 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { MaterialSymbol, getProviderIcon } from '@nimbalyst/runtime';
 
+interface ClaudeExecutionEnvironment {
+  mode: 'windows' | 'wsl';
+  distro?: string;
+}
+
 interface ProviderOverride {
   enabled?: boolean;
   models?: string[];
   defaultModel?: string;
   apiKey?: string;
+  executionEnvironment?: ClaudeExecutionEnvironment;
 }
 
 interface AIProviderOverrides {
@@ -206,6 +212,22 @@ export function ProjectAIProvidersPanel({ workspacePath, workspaceName }: Projec
     setHasChanges(true);
   };
 
+  const handleExecutionEnvironmentChange = (providerId: string, value: 'inherit' | 'windows' | 'wsl') => {
+    setProjectOverrides(prev => {
+      const newOverrides = { ...prev };
+      if (!newOverrides.providers) newOverrides.providers = {};
+      if (!newOverrides.providers[providerId]) newOverrides.providers[providerId] = {};
+
+      if (value === 'inherit') {
+        delete newOverrides.providers[providerId].executionEnvironment;
+      } else {
+        newOverrides.providers[providerId].executionEnvironment = { mode: value };
+      }
+      return newOverrides;
+    });
+    setHasChanges(true);
+  };
+
   const handleModelToggle = (providerId: string, modelId: string, enabled: boolean) => {
     setProjectOverrides(prev => {
       const newOverrides = { ...prev };
@@ -341,6 +363,35 @@ export function ProjectAIProvidersPanel({ workspacePath, workspaceName }: Projec
                             </label>
                           </div>
                         </div>
+
+                        {/* Claude execution environment (Windows-only, claude-code provider only) */}
+                        {provider.id === 'claude-code' && navigator.platform === 'Win32' && (
+                          <div className="config-section py-4 border-b border-[var(--nim-border)]">
+                            <h4 className="config-section-title nim-section-label m-0 mb-3">Claude Execution</h4>
+                            <div className="config-row flex items-center gap-3">
+                              <select
+                                className="text-sm rounded border border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] text-[var(--nim-text)] px-3 py-1.5"
+                                value={override?.executionEnvironment?.mode ?? 'inherit'}
+                                onChange={(e) => handleExecutionEnvironmentChange(
+                                  provider.id,
+                                  e.target.value as 'inherit' | 'windows' | 'wsl'
+                                )}
+                              >
+                                <option value="inherit">Default (Windows native)</option>
+                                <option value="windows">Windows native</option>
+                                <option value="wsl">WSL (default distro)</option>
+                              </select>
+                            </div>
+                            <p className="text-xs text-[var(--nim-text-faint)] mt-2 m-0">
+                              Where Claude Code runs for this project. Independent of the terminal shell. WSL mode requires <code className="font-mono">claude</code> on the Linux PATH inside the default distro.
+                            </p>
+                            {override?.executionEnvironment?.mode === 'wsl' && (
+                              <p className="text-xs mt-2 m-0 px-3 py-2 rounded bg-[var(--nim-accent-subtle)] text-[var(--nim-text-muted)]">
+                                <strong>Experimental.</strong> Session scanning and import for WSL-backed sessions is not yet supported — only sessions started after switching to WSL mode will appear correctly. Internal MCP servers may not be reachable across the WSL boundary; tools that depend on them (extension dev, session context) may fail until that bridge ships.
+                              </p>
+                            )}
+                          </div>
+                        )}
 
                         {/* API Key (if applicable) */}
                         {provider.apiKeyField && (

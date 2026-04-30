@@ -97,6 +97,7 @@ import { registerExtensionHandlers, getClaudePluginPaths, initializeExtensionFil
 import { queueMarketplaceInstallRequest, registerExtensionMarketplaceHandlers, runExtensionAutoUpdate } from './ipc/ExtensionMarketplaceHandlers';
 import { getRegisteredExtensions } from './extensions/RegisteredFileTypes';
 import { ClaudeCodeProvider, OpenAICodexProvider, OpenAICodexACPProvider, OpenCodeProvider, CopilotCLIProvider } from '@nimbalyst/runtime/ai/server';
+import { resolveClaudeExecution } from './services/wsl/wslExecutionResolver';
 import { sessionFileTracker } from './services/SessionFileTracker';
 import { historyManager } from './HistoryManager';
 import { readFileContentOrNull } from './services/ai/aiServiceUtils';
@@ -1677,6 +1678,13 @@ app.whenReady().then(async () => {
     const { store } = await import('./utils/store');
     ClaudeCodeProvider.setCustomClaudeCodePathLoader(() => store.get('customClaudeCodePath', '') as string);
     logger.main.info('[ClaudeCodeProvider] Initialized customClaudeCodePath loader');
+
+    // Wire the project-level Claude execution environment resolver. Returns null
+    // for the default Windows-native case; returns a wrapper-script-based resolution
+    // when the project has opted into WSL mode. Re-read on each query so users can
+    // toggle without restart.
+    ClaudeCodeProvider.setClaudeExecutionResolver((workspacePath) => resolveClaudeExecution(workspacePath));
+    logger.main.info('[ClaudeCodeProvider] Initialized claudeExecutionResolver');
 
     // Close splash screen now that initialization is done and a real window is about to show.
     // The last restored window activates the app via its own ready-to-show handler.

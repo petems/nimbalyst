@@ -16,6 +16,46 @@ export type ShellEnvironmentLoader = () => Record<string, string> | null;
 export type AdditionalDirectoriesLoader = (workspacePath: string) => string[];
 export type PatternSaver = (workspacePath: string, pattern: string) => Promise<void>;
 export type PatternChecker = (workspacePath: string, pattern: string) => Promise<boolean>;
+
+/**
+ * Resolution returned by the Claude execution-environment resolver.
+ *
+ * Returned only when a non-default execution mode is requested (currently:
+ * project-level WSL override on Windows). When null, the provider falls back
+ * to the standard customClaudeCodePathLoader / resolved-native-binary path.
+ */
+export interface ClaudeExecutionResolution {
+  /** Where Claude Code actually runs. */
+  mode: 'windows' | 'wsl';
+  /**
+   * Executable the SDK should spawn. For WSL mode, this is the wrapper script
+   * that invokes `wsl.exe --cd "<cwd>" --exec claude`. For Windows mode, the
+   * resolver returns null and existing path resolution applies.
+   */
+  pathToClaudeCodeExecutable: string;
+  /**
+   * Env overlays the provider must merge on top of its computed env. Notably
+   * WSLENV (allowlist of env vars the wrapper forwards into Linux) and any
+   * mode-specific clears (e.g. dropping HOME=USERPROFILE in WSL mode).
+   */
+  envOverrides: Record<string, string>;
+  /** WSL distro name when known (default distro when omitted). */
+  distro?: string;
+  /** Short display label for diagnostics, e.g. "WSL: Ubuntu". */
+  displayLabel: string;
+  /**
+   * Translate a Windows-form path into the form the launched Claude expects.
+   * For WSL mode this maps `C:\foo` to `/mnt/c/foo`. Returns null when no valid
+   * translation exists (e.g. a UNC share on a different host) so the caller can
+   * decide whether to drop the entry or surface a diagnostic.
+   *
+   * Called for plugin paths and additionalDirectories before they reach the SDK.
+   * No-op when the host platform doesn't need translation.
+   */
+  translatePath: (windowsPath: string) => string | null;
+}
+
+export type ClaudeExecutionResolver = (workspacePath?: string) => ClaudeExecutionResolution | null;
 export type ImageCompressor = (
   buffer: Buffer,
   mimeType: string,
@@ -36,6 +76,12 @@ export const ClaudeCodeDeps = {
   // Loader that reads the custom Claude Code executable path fresh from the settings store.
   // Re-read on each query so changes in the UI take effect without restart.
   customClaudeCodePathLoader: null as (() => string) | null,
+
+  // Resolves the project-level Claude execution environment override (Windows-only).
+  // Returns null when the project is using the default Windows-native path; returns
+  // a ClaudeExecutionResolution when the project has opted into WSL mode. Re-read on
+  // each query so toggling the override applies on the next session start.
+  claudeExecutionResolver: null as ClaudeExecutionResolver | null,
 
   // ---- MCP Server Ports ----
 
@@ -120,6 +166,10 @@ export const ClaudeCodeDeps = {
 
   setCustomClaudeCodePathLoader(loader: (() => string) | null): void {
     this.customClaudeCodePathLoader = loader;
+  },
+
+  setClaudeExecutionResolver(resolver: ClaudeExecutionResolver | null): void {
+    this.claudeExecutionResolver = resolver;
   },
 
   setMcpServerPort(port: number | null): void {

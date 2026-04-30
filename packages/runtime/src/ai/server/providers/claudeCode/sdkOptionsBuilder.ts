@@ -114,8 +114,18 @@ export async function buildSdkOptions(
 
   const resolvedBinaryPath = await resolveClaudeAgentCliPath().catch(() => undefined);
   const customPath = ClaudeCodeDeps.customClaudeCodePathLoader?.() || '';
-  const effectivePath = customPath || resolvedBinaryPath;
-  console.log(`[CLAUDE-CODE] Binary path: custom=${customPath || '(none)'} resolved=${resolvedBinaryPath ?? '(none)'} effective=${effectivePath ?? '(none)'}`);
+
+  // Project-level Claude execution-environment override (Windows-only WSL toggle).
+  // When the resolver returns a non-null resolution, its pathToClaudeCodeExecutable
+  // and envOverrides take precedence over the customPath/resolvedBinary path. Falls
+  // through to existing behavior when null.
+  const executionResolution = ClaudeCodeDeps.claudeExecutionResolver?.(workspacePath) ?? null;
+  const executionMode: 'windows' | 'wsl' = executionResolution?.mode ?? 'windows';
+
+  const effectivePath = executionResolution
+    ? executionResolution.pathToClaudeCodeExecutable
+    : (customPath || resolvedBinaryPath);
+  console.log(`[CLAUDE-CODE] Binary path: mode=${executionMode}${executionResolution ? ` (${executionResolution.displayLabel})` : ''} custom=${customPath || '(none)'} resolved=${resolvedBinaryPath ?? '(none)'} effective=${effectivePath ?? '(none)'}`);
 
   const options: any = {
     pathToClaudeCodeExecutable: effectivePath,
@@ -156,24 +166,54 @@ export async function buildSdkOptions(
   teammateManager.lastUsedSessionId = sessionId;
   teammateManager.lastUsedPermissionsPath = permissionsPath;
 
-  // Load extension plugins
+  // Load extension plugins. In WSL execution mode, translate plugin paths from
+  // their Windows form (`C:\...`) into the WSL-side form (`/mnt/c/...`) — Claude
+  // running inside WSL can't reach Windows-form paths. Plugins that can't be
+  // translated (e.g. UNC paths to unrelated hosts) are dropped with a warning.
   if (ClaudeCodeDeps.extensionPluginsLoader) {
     try {
       const extensionPlugins = await ClaudeCodeDeps.extensionPluginsLoader(workspacePath);
       if (extensionPlugins.length > 0) {
-        options.plugins = extensionPlugins;
+        if (executionResolution) {
+          const translated: typeof extensionPlugins = [];
+          for (const plugin of extensionPlugins) {
+            const translatedPath = executionResolution.translatePath(plugin.path);
+            if (translatedPath) {
+              translated.push({ ...plugin, path: translatedPath });
+            } else {
+              console.warn(`[CLAUDE-CODE] Dropping plugin in ${executionResolution.displayLabel} mode (no translation for path): ${plugin.path}`);
+            }
+          }
+          if (translated.length > 0) options.plugins = translated;
+        } else {
+          options.plugins = extensionPlugins;
+        }
       }
     } catch (error) {
       console.warn('[CLAUDE-CODE] Failed to load extension plugins:', error);
     }
   }
 
-  // Add additional directories based on workspace context
+  // Add additional directories based on workspace context. Same path-translation
+  // story as plugins above.
   if (ClaudeCodeDeps.additionalDirectoriesLoader) {
     try {
       const additionalDirs = ClaudeCodeDeps.additionalDirectoriesLoader(workspacePath);
       if (additionalDirs.length > 0) {
-        options.additionalDirectories = additionalDirs;
+        if (executionResolution) {
+          const translated: string[] = [];
+          for (const dir of additionalDirs) {
+            const translatedDir = executionResolution.translatePath(dir);
+            if (translatedDir) {
+              translated.push(translatedDir);
+            } else {
+              console.warn(`[CLAUDE-CODE] Dropping additional directory in ${executionResolution.displayLabel} mode (no translation for path): ${dir}`);
+            }
+          }
+          if (translated.length > 0) options.additionalDirectories = translated;
+        } else {
+          options.additionalDirectories = additionalDirs;
+        }
       }
     } catch (error) {
       console.warn('[CLAUDE-CODE] Failed to load additional directories:', error);
@@ -227,18 +267,28 @@ export async function buildSdkOptions(
     env.PATH = enhancedPath;
   }
 
-  // NIM-838: On Windows, force HOME to mirror USERPROFILE so the native binary
-  // resolves the same ~/.claude root on every spawn, regardless of whether its
-  // internal logic prefers HOME (Unix-style) or USERPROFILE. process.env on
-  // Windows usually has USERPROFILE but no HOME, leaving the binary to make a
-  // platform-specific choice; a mismatch between turn-1 write and turn-2 read
-  // would manifest exactly as the resume failures we're seeing.
-  if (process.platform === 'win32') {
+  // NIM-838: On Windows-native execution, force HOME to mirror USERPROFILE so the
+  // native binary resolves the same ~/.claude root on every spawn, regardless of
+  // whether its internal logic prefers HOME (Unix-style) or USERPROFILE. process.env
+  // on Windows usually has USERPROFILE but no HOME, leaving the binary to make a
+  // platform-specific choice; a mismatch between turn-1 write and turn-2 read would
+  // manifest exactly as the resume failures we're seeing.
+  //
+  // CRITICAL: do NOT apply this overlay in WSL execution mode. The Linux-side Claude
+  // running inside WSL has its own $HOME (e.g., /home/<user>) and forcing it to a
+  // Windows path would break ~/.claude resolution on the Linux side.
+  if (process.platform === 'win32' && executionMode === 'windows') {
     const winHome = env.USERPROFILE || process.env.USERPROFILE;
     if (winHome) {
       env.HOME = winHome;
       env.USERPROFILE = winHome;
     }
+  }
+
+  // Apply env overrides from the execution resolver (e.g., WSLENV allowlist for
+  // forwarding selected Windows-side vars into the WSL subprocess).
+  if (executionResolution) {
+    Object.assign(env, executionResolution.envOverrides);
   }
 
   if (enableAgentTeams) {
