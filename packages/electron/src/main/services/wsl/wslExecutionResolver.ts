@@ -16,7 +16,7 @@ import type { ClaudeExecutionResolution } from '@nimbalyst/runtime/ai/server';
 import { getClaudeExecutionEnvironment } from '../../utils/aiSettingsMerge';
 import { windowsToWsl } from './pathTranslation';
 
-const WSL_LAUNCHER_BASENAME = 'wsl-claude-launcher.cmd';
+const WSL_LAUNCHER_BASENAME = 'wsl-claude-launcher.mjs';
 
 /**
  * Env vars that must propagate from the Windows host into the WSL subprocess.
@@ -48,8 +48,8 @@ function buildWslEnv(): string {
  * Resolve the absolute path to the WSL launcher script that ships with the app.
  *
  * Dev mode: from the workspace's resources directory.
- * Packaged: from app.asar.unpacked/resources/ (the .cmd cannot live inside the
- * asar virtual filesystem because cmd.exe can't read it from there).
+ * Packaged: from app.asar.unpacked/resources/ (the .mjs cannot live inside the
+ * asar virtual filesystem because node needs a real filesystem path).
  */
 function resolveLauncherPath(): string {
   const appPath = app.getAppPath();

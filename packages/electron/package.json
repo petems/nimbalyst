@@ -287,8 +287,8 @@
         "to": "trayTemplate@2x.png"
       },
       {
-        "from": "resources/wsl-claude-launcher.cmd",
-        "to": "app.asar.unpacked/resources/wsl-claude-launcher.cmd"
+        "from": "resources/wsl-claude-launcher.mjs",
+        "to": "app.asar.unpacked/resources/wsl-claude-launcher.mjs"
       },
       {
         "from": "../extensions",

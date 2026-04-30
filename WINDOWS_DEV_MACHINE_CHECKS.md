@@ -68,32 +68,20 @@ Start a Claude Code session in the project. Expected lines:
 
 ```
 [ClaudeCodeProvider] Initialized claudeExecutionResolver
-[CLAUDE-CODE] Binary path: mode=wsl (WSL (default distro)) custom=(none) resolved=...\claude.exe effective=...\app.asar.unpacked\resources\wsl-claude-launcher.cmd
+[CLAUDE-CODE] Binary path: mode=wsl (WSL (default distro)) custom=(none) resolved=...\claude.exe effective=...\app.asar.unpacked\resources\wsl-claude-launcher.mjs
 ```
 
 If `mode=wsl` does not appear, the resolver is not firing — check the
 project override is saved and the workspace path resolves.
 
-### CVE-2024-27980 risk
+### CVE-2024-27980 (resolved)
 
-Node >= 20 refuses to spawn `.cmd`/`.bat` files without `shell: true`. If
-the Claude Agent SDK does not pass `shell: true` to its internal
-`child_process.spawn`, the launcher will fail with `EINVAL` or `ENOENT`.
-
-**Symptoms:** Session start fails immediately. Main log shows
-`spawn EINVAL` or similar from the SDK. No Claude output ever streams.
-
-**Fix:** Replace the `.cmd` wrapper at
-`packages/electron/resources/wsl-claude-launcher.cmd` with a precompiled
-`.exe` that performs the same `wsl.exe --cd "<cwd>" --exec claude <args>`
-invocation. Options in rough preference order:
-
-1. Tiny Go binary (single static `.exe`, easy CI cross-compile from macOS).
-2. Rust with `windows-rs` (more setup but produces a clean `.exe`).
-3. `pkg`-bundled Node script (heavier, but reuses what we already wrote).
-
-Update the `extraResources` entry in `packages/electron/package.json` to
-ship the `.exe` instead of the `.cmd`.
+Node >= 20 refuses to spawn `.cmd`/`.bat` files without `shell: true`, and
+the Claude Agent SDK never passes `shell: true`. The original `.cmd` launcher
+was replaced with `wsl-claude-launcher.mjs`. The SDK's internal `MR()` check
+treats `.mjs` as a script, so it spawns `node <launcher.mjs>` rather than
+the file directly — no shell needed. The `.mjs` launcher then spawns
+`wsl.exe` (a real `.exe`) with `stdio: 'inherit'`.
 
 ## 4. WSLENV passthrough
 
