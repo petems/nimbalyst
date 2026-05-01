@@ -12,6 +12,20 @@
  * (ClaudeCodeProvider, CodexProvider, etc.)
  */
 
+import type { ClaudeExecutionResolution } from '../providers/claudeCode/dependencyInjection';
+
+/**
+ * Detect Windows-form paths (DOS drive letters or UNC shares). We use this to
+ * translate user/workspace stdio MCP args when the actual Claude process runs
+ * on the Linux side of WSL — the Windows-side path expansion produces strings
+ * like `C:\Users\Bob\.config` that don't exist in the Linux filesystem.
+ */
+const WINDOWS_PATH_PATTERN = /^[A-Za-z]:[\\/]|^\\\\/;
+
+function looksLikeWindowsPath(value: string): boolean {
+  return WINDOWS_PATH_PATTERN.test(value);
+}
+
 export interface McpConfigServiceDeps {
   /** Port for the main Nimbalyst MCP server (provides capture_editor_screenshot, etc.) */
   mcpServerPort: number | null;
@@ -64,12 +78,23 @@ export class McpConfigService {
    *
    * @param options.sessionId - Session ID for session-specific servers
    * @param options.workspacePath - Workspace path for workspace-specific servers
+   * @param options.executionResolution - Execution-environment override for the
+   *   current session (currently: WSL on Windows). When set, stdio MCP server
+   *   configs are post-processed so paths produced by Windows-side env expansion
+   *   are translated into the form Claude (running inside WSL) can resolve.
+   *   Servers whose required paths can't be translated are dropped with a
+   *   diagnostic to avoid passing bogus paths to the Linux subprocess.
    * @returns Merged MCP server configuration object
    */
   async getMcpServersConfig(
-    options: { sessionId?: string; workspacePath?: string; profile?: 'standard' | 'meta-agent' }
+    options: {
+      sessionId?: string;
+      workspacePath?: string;
+      profile?: 'standard' | 'meta-agent';
+      executionResolution?: ClaudeExecutionResolution | null;
+    }
   ): Promise<Record<string, any>> {
-    const { sessionId, workspacePath, profile = 'standard' } = options;
+    const { sessionId, workspacePath, profile = 'standard', executionResolution } = options;
     const config: any = {};
     const isMetaAgent = profile === 'meta-agent';
 
@@ -142,17 +167,23 @@ export class McpConfigService {
 
         // Process each server config
         for (const [serverName, serverConfig] of Object.entries(mergedServers)) {
-          const processedConfig = await this.processServerConfig(serverName, serverConfig as any);
-          config[serverName] = processedConfig;
+          const processedConfig = await this.processServerConfig(
+            serverName,
+            serverConfig as any,
+            executionResolution ?? null
+          );
+          if (processedConfig) {
+            config[serverName] = processedConfig;
+          }
         }
       } catch (error) {
         console.error('[MCP-CONFIG] Failed to load MCP servers from config loader:', error);
         // Fall back to workspace-only loading
-        await this.loadWorkspaceMcpServers(workspacePath, config);
+        await this.loadWorkspaceMcpServers(workspacePath, config, executionResolution ?? null);
       }
     } else {
       // Fallback: Load from workspace .mcp.json only (legacy behavior)
-      await this.loadWorkspaceMcpServers(workspacePath, config);
+      await this.loadWorkspaceMcpServers(workspacePath, config, executionResolution ?? null);
     }
 
     return config;
@@ -169,11 +200,23 @@ export class McpConfigService {
    * - Converts API key env vars to Authorization headers
    * - Removes env object (not used for SSE)
    *
+   * When `executionResolution` is set (currently: WSL on Windows) and the
+   * transport is stdio, after expansion any Windows-form path is translated
+   * into the form the Linux Claude subprocess can reach. Servers with at
+   * least one untranslatable required path return null so the caller can drop
+   * them with a diagnostic — passing them through unchanged would silently
+   * produce broken tool execution after the session starts.
+   *
    * @param serverName - Name of the MCP server
    * @param serverConfig - Raw server configuration
-   * @returns Processed server configuration
+   * @param executionResolution - Execution-mode resolution (or null)
+   * @returns Processed server configuration, or null if the server should be dropped
    */
-  private async processServerConfig(serverName: string, serverConfig: any): Promise<any> {
+  private async processServerConfig(
+    serverName: string,
+    serverConfig: any,
+    executionResolution: ClaudeExecutionResolution | null
+  ): Promise<any | null> {
     const processedConfig = { ...serverConfig };
     const transportType = processedConfig.type === 'sse' || processedConfig.type === 'http'
       ? processedConfig.type
@@ -211,6 +254,71 @@ export class McpConfigService {
       );
     }
 
+    // WSL mode: stdio MCP servers are spawned by the Linux Claude subprocess.
+    // Anything we already expanded above using Windows-side env (HOME pointing
+    // at C:\Users\..., PATH containing C:\Program Files\..., etc.) is now a
+    // Windows-form path that doesn't exist in the Linux filesystem. Translate
+    // each Windows-form value into its WSL equivalent; drop the server with a
+    // diagnostic if any required path can't be translated.
+    if (transportType === 'stdio' && executionResolution) {
+      if (typeof processedConfig.command === 'string' && looksLikeWindowsPath(processedConfig.command)) {
+        const translated = executionResolution.translatePath(processedConfig.command);
+        if (!translated) {
+          console.warn(
+            `[MCP-CONFIG] Dropping MCP server "${serverName}" in ${executionResolution.displayLabel} mode: ` +
+            `command "${processedConfig.command}" has no WSL-side equivalent.`
+          );
+          return null;
+        }
+        processedConfig.command = translated;
+      }
+
+      if (Array.isArray(processedConfig.args)) {
+        const translatedArgs: string[] = [];
+        for (const arg of processedConfig.args) {
+          if (typeof arg === 'string' && looksLikeWindowsPath(arg)) {
+            const translated = executionResolution.translatePath(arg);
+            if (!translated) {
+              console.warn(
+                `[MCP-CONFIG] Dropping MCP server "${serverName}" in ${executionResolution.displayLabel} mode: ` +
+                `arg "${arg}" has no WSL-side equivalent.`
+              );
+              return null;
+            }
+            translatedArgs.push(translated);
+          } else {
+            translatedArgs.push(arg);
+          }
+        }
+        processedConfig.args = translatedArgs;
+      }
+
+      if (processedConfig.env && typeof processedConfig.env === 'object') {
+        const translatedEnv: Record<string, string> = {};
+        for (const [key, rawValue] of Object.entries(processedConfig.env)) {
+          if (typeof rawValue !== 'string') {
+            translatedEnv[key] = rawValue as any;
+            continue;
+          }
+          const expanded = this.expandEnvVar(rawValue, combinedEnv);
+          if (looksLikeWindowsPath(expanded)) {
+            const translated = executionResolution.translatePath(expanded);
+            if (!translated) {
+              console.warn(
+                `[MCP-CONFIG] Dropping MCP server "${serverName}" in ${executionResolution.displayLabel} mode: ` +
+                `env var ${key}="${expanded}" has no WSL-side equivalent.`
+              );
+              return null;
+            }
+            translatedEnv[key] = translated;
+          } else {
+            translatedEnv[key] = expanded;
+          }
+        }
+        processedConfig.env = translatedEnv;
+      }
+    }
+
     // For SSE transport, convert env vars to headers (SDK requirement)
     if (transportType === 'sse' && processedConfig.env) {
       processedConfig.headers = processedConfig.headers || {};
@@ -241,8 +349,13 @@ export class McpConfigService {
    *
    * @param workspacePath - Path to the workspace
    * @param config - Existing config object to merge into
+   * @param executionResolution - Execution-mode resolution (or null) for path translation
    */
-  private async loadWorkspaceMcpServers(workspacePath: string | undefined, config: any): Promise<void> {
+  private async loadWorkspaceMcpServers(
+    workspacePath: string | undefined,
+    config: any,
+    executionResolution: ClaudeExecutionResolution | null
+  ): Promise<void> {
     if (!workspacePath) return;
 
     try {
@@ -257,8 +370,14 @@ export class McpConfigService {
         if (mcpConfig.mcpServers && typeof mcpConfig.mcpServers === 'object') {
           // Process and merge workspace MCP servers with built-in servers
           for (const [serverName, serverConfig] of Object.entries(mcpConfig.mcpServers)) {
-            const processedConfig = await this.processServerConfig(serverName, serverConfig as any);
-            config[serverName] = processedConfig;
+            const processedConfig = await this.processServerConfig(
+              serverName,
+              serverConfig as any,
+              executionResolution
+            );
+            if (processedConfig) {
+              config[serverName] = processedConfig;
+            }
           }
         }
       }

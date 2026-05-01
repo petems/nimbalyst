@@ -9,7 +9,7 @@
 import type { ContentBlockParam, TextBlockParam, MessageParam } from '@anthropic-ai/sdk/resources';
 import path from 'path';
 import { app } from 'electron';
-import { ClaudeCodeDeps } from './dependencyInjection';
+import { ClaudeCodeDeps, type ClaudeExecutionResolution } from './dependencyInjection';
 import { resolveClaudeAgentCliPath } from './cliPathResolver';
 import { DEFAULT_EFFORT_LEVEL } from '../../effortLevels';
 
@@ -23,7 +23,13 @@ type SDKUserMessage = {
 
 export interface BuildSdkOptionsDeps {
   resolveModelVariant: () => string;
-  mcpConfigService: { getMcpServersConfig: (params: { sessionId?: string; workspacePath: string }) => Promise<Record<string, any>> };
+  mcpConfigService: {
+    getMcpServersConfig: (params: {
+      sessionId?: string;
+      workspacePath: string;
+      executionResolution?: ClaudeExecutionResolution | null;
+    }) => Promise<Record<string, any>>;
+  };
   createCanUseToolHandler: (sessionId?: string, workspacePath?: string, permissionsPath?: string) => any;
   toolHooksService: { createPreToolUseHook: () => any; createPostToolUseHook: () => any };
   teammateManager: {
@@ -137,7 +143,11 @@ export async function buildSdkOptions(
           append: systemPrompt
         },
     settingSources,
-    mcpServers: await mcpConfigService.getMcpServersConfig({ sessionId, workspacePath: mcpConfigWorkspacePath || workspacePath }),
+    mcpServers: await mcpConfigService.getMcpServersConfig({
+      sessionId,
+      workspacePath: mcpConfigWorkspacePath || workspacePath,
+      executionResolution,
+    }),
     cwd: workspacePath,
     abortController,
     model: resolveModelVariant(),
@@ -313,16 +323,27 @@ export async function buildSdkOptions(
   // find ~/.claude/. We no longer overlay setupClaudeCodeEnvironment() because
   // it was designed for the old Node.js execution path and its Object.assign
   // clobbered our sanitized env.
-  if (app.isPackaged) {
-    if (customPath) {
+  //
+  // We also set packagedBuildOptions when a non-default execution resolution
+  // is in effect (currently: WSL mode). Otherwise teammates spawned from a
+  // dev-build WSL session would fall through to the SDK default, which on
+  // Windows points at the native Claude binary and would split the lead/team
+  // execution environment across Windows and WSL.
+  if (app.isPackaged || executionResolution) {
+    if (customPath && !executionResolution) {
       helperMethod = 'custom';
-    } else {
+    } else if (app.isPackaged && !executionResolution) {
       console.log(`[ClaudeCodeProvider] Pre-resolved native binary for packaged build: ${resolvedBinaryPath ?? '(resolveClaudeAgentCliPath returned undefined)'}`);
     }
 
     teammateManager.packagedBuildOptions = {
       env: env as Record<string, string | undefined>,
-      pathToClaudeCodeExecutable: customPath || resolvedBinaryPath,
+      // Use effectivePath so teammates inherit the same execution mode as the
+      // lead. In WSL mode this is the launcher script, not the Windows-native
+      // binary — without this fix teammates would run the Windows binary while
+      // the lead runs through WSL, splitting cwd/session/tool execution.
+      pathToClaudeCodeExecutable: effectivePath,
+      executionResolution,
     };
   }
 

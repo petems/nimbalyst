@@ -591,6 +591,7 @@ export class ClaudeCodeProvider extends BaseAgentProvider {
           sessionId,
           workspacePath,
           profile: 'meta-agent',
+          executionResolution: ClaudeCodeDeps.claudeExecutionResolver?.(workspacePath) ?? null,
         });
         const allowedSet = new Set(BaseAgentProvider.META_AGENT_ALLOWED_TOOLS);
         const blockedNativeTools = SDK_NATIVE_TOOLS.filter(t => !allowedSet.has(t));

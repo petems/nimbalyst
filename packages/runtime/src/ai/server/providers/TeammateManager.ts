@@ -14,6 +14,7 @@ interface Query extends AsyncGenerator<SDKMessage, void> {
 import path from 'path';
 import fsp from 'fs/promises';
 import os from 'os';
+import type { ClaudeExecutionResolution } from './claudeCode/dependencyInjection';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -90,10 +91,16 @@ export interface TeammateManagerDeps {
  * Packaged-build options for spawning Claude Code subprocesses.
  * In production Electron builds, the SDK needs environment and binary path
  * configuration since the native binary lives inside asar-unpacked.
+ *
+ * `executionResolution` carries the lead's execution-mode context (currently
+ * just WSL on Windows). Teammates must inherit the same resolution so their
+ * cwd, additionalDirectories, and binary path stay aligned with the lead;
+ * splitting them would put parallel agents in different filesystems.
  */
 export interface PackagedBuildOptions {
   env: Record<string, string | undefined>;
   pathToClaudeCodeExecutable?: string;
+  executionResolution?: ClaudeExecutionResolution | null;
 }
 
 // ─── Class ──────────────────────────────────────────────────────────────────
@@ -1419,7 +1426,27 @@ export class TeammateManager {
     resumeSessionId?: string,
   ): Promise<{ capturedSessionId: string | undefined; approvedShutdown: boolean; capturedResultText: string | undefined; sentMessageToLead: boolean }> {
     const cwd = this.lastUsedCwd || process.cwd();
-    const teammateAdditionalDirectories = [os.tmpdir()];
+    // In WSL execution mode the launcher (`wsl.exe --cd`) auto-translates the
+    // Windows-form cwd into /mnt/<drive>/... — but additionalDirectories is
+    // forwarded verbatim to the Linux Claude in argv, so we must translate
+    // those ourselves. Drop entries that have no WSL-side equivalent (e.g.
+    // an unmappable UNC share) rather than passing a path the Linux side
+    // can't open.
+    const executionResolution = this.packagedBuildOptions?.executionResolution ?? null;
+    const tempDir = os.tmpdir();
+    const teammateAdditionalDirectories: string[] = [];
+    if (executionResolution) {
+      const translated = executionResolution.translatePath(tempDir);
+      if (translated) {
+        teammateAdditionalDirectories.push(translated);
+      } else {
+        console.warn(
+          `[MANAGED-TEAMMATE] Dropping temp dir for ${executionResolution.displayLabel} mode (no translation): ${tempDir}`
+        );
+      }
+    } else {
+      teammateAdditionalDirectories.push(tempDir);
+    }
 
     const permissionsPath = this.lastUsedPermissionsPath;
 

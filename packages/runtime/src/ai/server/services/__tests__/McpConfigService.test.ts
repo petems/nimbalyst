@@ -430,6 +430,185 @@ describe('McpConfigService', () => {
     });
   });
 
+  describe('WSL execution-mode awareness (stdio servers)', () => {
+    const wslResolution = {
+      mode: 'wsl' as const,
+      pathToClaudeCodeExecutable: 'C:\\app\\resources\\wsl-claude-launcher.mjs',
+      envOverrides: { WSLENV: 'ANTHROPIC_API_KEY/u' },
+      distro: 'Ubuntu',
+      displayLabel: 'WSL: Ubuntu',
+      translatePath: (p: string) => {
+        const m = p.match(/^([A-Za-z]):[\\/](.*)$/);
+        if (!m) return null;
+        return `/mnt/${m[1].toLowerCase()}/${m[2].replace(/\\/g, '/')}`;
+      },
+    };
+
+    it('translates Windows-form paths in stdio args after env expansion', async () => {
+      mockDeps.mcpConfigLoader = async () => ({
+        'fs-server': {
+          type: 'stdio',
+          command: 'node',
+          args: ['${HOME}/scripts/server.js'],
+        },
+      });
+
+      // Simulate Windows-side expansion: ${HOME} -> C:\Users\dev
+      mockDeps.shellEnvironmentLoader = () => ({
+        HOME: 'C:\\Users\\dev',
+      });
+
+      service = new McpConfigService(mockDeps);
+      const config = await service.getMcpServersConfig({
+        workspacePath: 'C:\\Users\\dev\\workspace',
+        executionResolution: wslResolution,
+      });
+
+      expect(config['fs-server']).toBeDefined();
+      expect(config['fs-server'].args[0]).toBe('/mnt/c/Users/dev/scripts/server.js');
+    });
+
+    it('drops a stdio server with an untranslatable Windows path and warns', async () => {
+      mockDeps.mcpConfigLoader = async () => ({
+        'unc-server': {
+          type: 'stdio',
+          command: 'node',
+          args: ['\\\\printer\\share\\server.js'],
+        },
+      });
+      mockDeps.shellEnvironmentLoader = () => ({});
+
+      const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      service = new McpConfigService(mockDeps);
+      const config = await service.getMcpServersConfig({
+        workspacePath: 'C:\\Users\\dev\\workspace',
+        executionResolution: wslResolution,
+      });
+
+      expect(config['unc-server']).toBeUndefined();
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Dropping MCP server "unc-server"')
+      );
+      consoleWarnSpy.mockRestore();
+    });
+
+    it('drops a stdio server when its command is an untranslatable Windows path', async () => {
+      mockDeps.mcpConfigLoader = async () => ({
+        'bad-cmd-server': {
+          type: 'stdio',
+          command: '\\\\fileshare\\node.exe',
+          args: [],
+        },
+      });
+      mockDeps.shellEnvironmentLoader = () => ({});
+
+      const consoleWarnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      service = new McpConfigService(mockDeps);
+      const config = await service.getMcpServersConfig({
+        workspacePath: 'C:\\Users\\dev\\workspace',
+        executionResolution: wslResolution,
+      });
+
+      expect(config['bad-cmd-server']).toBeUndefined();
+      expect(consoleWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Dropping MCP server "bad-cmd-server"')
+      );
+      consoleWarnSpy.mockRestore();
+    });
+
+    it('translates Windows-form values in stdio env after expansion', async () => {
+      mockDeps.mcpConfigLoader = async () => ({
+        'env-server': {
+          type: 'stdio',
+          command: 'node',
+          args: ['server.js'],
+          env: {
+            DATA_DIR: '${USERPROFILE}\\data',
+            FLAG: '1',
+          },
+        },
+      });
+      mockDeps.shellEnvironmentLoader = () => ({
+        USERPROFILE: 'C:\\Users\\dev',
+      });
+
+      service = new McpConfigService(mockDeps);
+      const config = await service.getMcpServersConfig({
+        workspacePath: 'C:\\Users\\dev\\workspace',
+        executionResolution: wslResolution,
+      });
+
+      expect(config['env-server']).toBeDefined();
+      expect(config['env-server'].env.DATA_DIR).toBe('/mnt/c/Users/dev/data');
+      expect(config['env-server'].env.FLAG).toBe('1');
+    });
+
+    it('leaves non-path args alone in WSL mode', async () => {
+      mockDeps.mcpConfigLoader = async () => ({
+        'flag-server': {
+          type: 'stdio',
+          command: 'npx',
+          args: ['-y', '@example/mcp-server', '--port', '8080'],
+        },
+      });
+      mockDeps.shellEnvironmentLoader = () => ({});
+
+      service = new McpConfigService(mockDeps);
+      const config = await service.getMcpServersConfig({
+        workspacePath: 'C:\\Users\\dev\\workspace',
+        executionResolution: wslResolution,
+      });
+
+      expect(config['flag-server']).toBeDefined();
+      expect(config['flag-server'].args).toEqual(['-y', '@example/mcp-server', '--port', '8080']);
+    });
+
+    it('does not touch SSE servers in WSL mode (URL-only, no path translation)', async () => {
+      mockDeps.mcpConfigLoader = async () => ({
+        'sse-server': {
+          type: 'sse',
+          url: 'http://example.com/mcp',
+          env: {
+            OPENAI_API_KEY: 'sk-test',
+          },
+        },
+      });
+
+      service = new McpConfigService(mockDeps);
+      const config = await service.getMcpServersConfig({
+        workspacePath: 'C:\\Users\\dev\\workspace',
+        executionResolution: wslResolution,
+      });
+
+      expect(config['sse-server']).toBeDefined();
+      expect(config['sse-server'].url).toBe('http://example.com/mcp');
+      expect(config['sse-server'].headers['Authorization']).toBe('Bearer sk-test');
+    });
+
+    it('passes stdio configs through unchanged when no executionResolution is provided', async () => {
+      mockDeps.mcpConfigLoader = async () => ({
+        'fs-server': {
+          type: 'stdio',
+          command: 'node',
+          args: ['${HOME}/scripts/server.js'],
+        },
+      });
+      mockDeps.shellEnvironmentLoader = () => ({
+        HOME: '/Users/dev',
+      });
+
+      service = new McpConfigService(mockDeps);
+      const config = await service.getMcpServersConfig({
+        workspacePath: '/Users/dev/workspace',
+      });
+
+      // No translation happens — Linux-form path stays as expanded.
+      expect(config['fs-server'].args[0]).toBe('/Users/dev/scripts/server.js');
+    });
+  });
+
   describe('Environment Loading Priority', () => {
     it('should prioritize claudeSettingsEnv over shellEnv', async () => {
       mockDeps.mcpConfigLoader = async () => ({
