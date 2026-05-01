@@ -1,12 +1,18 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { useAtomValue, useSetAtom } from 'jotai';
-import { ProviderConfig, Model } from '../../Settings/SettingsView';
+import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import { useAtom, useAtomValue, useSetAtom } from 'jotai';
+import { ProviderConfig, Model, SettingsScope } from '../../Settings/SettingsView';
 import {ClaudeForWindowsInstallation} from "../../../../main/services/CLIManager.ts";
 import {usePostHog} from "posthog-js/react";
 import {
   claudeUsageIndicatorEnabledAtom,
   setClaudeUsageIndicatorEnabledAtom,
 } from '../../../store/atoms/claudeUsageAtoms';
+import {
+  workspaceAISettingsAtomFamily,
+  loadWorkspaceAISettings,
+  saveWorkspaceAISettings,
+  type AIProviderOverrides,
+} from '../../../store/atoms/appSettings';
 import { SettingsToggle, ToggleSwitch } from '../SettingsToggle';
 
 // Built-in SDK version (injected at build time via electron.vite.config.ts define)
@@ -24,6 +30,10 @@ interface ClaudeCodePanelProps {
   onSelectAllModels: (selectAll: boolean) => void;
   onTestConnection: () => Promise<void>;
   onConfigChange: (updates: Partial<ProviderConfig>) => void;
+  /** Settings scope - 'project' shows per-project overrides like WSL execution mode. */
+  scope?: SettingsScope;
+  /** Workspace path - required for project-scoped overrides. */
+  workspacePath?: string | null;
 }
 
 type AuthMethod = 'login' | 'api-key';
@@ -38,7 +48,9 @@ export function ClaudeCodePanel({
   onModelToggle,
   onSelectAllModels,
   onTestConnection,
-  onConfigChange
+  onConfigChange,
+  scope,
+  workspacePath
 }: ClaudeCodePanelProps) {
   const [loginStatus, setLoginStatus] = useState<{
     isLoggedIn: boolean;
@@ -86,6 +98,61 @@ export function ClaudeCodePanel({
 
   // Detect macOS platform (usage indicator only available on macOS)
   const isMacOS = navigator.platform.toLowerCase().includes('mac');
+
+  // Per-project execution environment (Windows + project scope only)
+  const showExecutionEnvSection =
+    isWindowsPlatform && scope === 'project' && Boolean(workspacePath);
+  const workspaceSettingsAtom = useMemo(
+    () => workspaceAISettingsAtomFamily(workspacePath ?? ''),
+    [workspacePath]
+  );
+  const [workspaceSettings, setWorkspaceSettings] = useAtom(workspaceSettingsAtom);
+
+  useEffect(() => {
+    if (!showExecutionEnvSection || !workspacePath) return;
+    let cancelled = false;
+    loadWorkspaceAISettings(workspacePath).then(state => {
+      if (!cancelled) setWorkspaceSettings(state);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [showExecutionEnvSection, workspacePath, setWorkspaceSettings]);
+
+  const executionMode: 'inherit' | 'windows' | 'wsl' =
+    workspaceSettings.overrides.providers?.['claude-code']?.executionEnvironment?.mode ?? 'inherit';
+
+  const handleExecutionModeChange = async (
+    value: 'inherit' | 'windows' | 'wsl'
+  ) => {
+    if (!workspacePath) return;
+    const current = workspaceSettings.overrides;
+    const currentClaudeCode = current.providers?.['claude-code'] ?? {};
+    const nextClaudeCode = { ...currentClaudeCode };
+    if (value === 'inherit') {
+      delete nextClaudeCode.executionEnvironment;
+    } else {
+      nextClaudeCode.executionEnvironment = { mode: value };
+    }
+    const nextProviders = { ...(current.providers ?? {}) };
+    if (Object.keys(nextClaudeCode).length === 0) {
+      delete nextProviders['claude-code'];
+    } else {
+      nextProviders['claude-code'] = nextClaudeCode;
+    }
+    const nextOverrides: AIProviderOverrides = { ...current };
+    if (Object.keys(nextProviders).length === 0) {
+      delete nextOverrides.providers;
+    } else {
+      nextOverrides.providers = nextProviders;
+    }
+    setWorkspaceSettings({ ...workspaceSettings, overrides: nextOverrides });
+    try {
+      await saveWorkspaceAISettings(workspacePath, nextOverrides);
+    } catch (error) {
+      console.error('[ClaudeCodePanel] Failed to save WSL execution mode:', error);
+    }
+  };
 
   // Load environment variables
   const loadEnvVars = useCallback(async () => {
@@ -325,6 +392,34 @@ export function ClaudeCodePanel({
           Leave empty to use the built-in SDK. Changes take effect on the next agent session.
         </p>
       </div>
+
+      {/* Claude Execution Environment (Windows + project scope) */}
+      {showExecutionEnvSection && (
+        <div className="provider-enable flex flex-col gap-2 py-4 mb-4 border-b border-[var(--nim-border)]">
+          <div>
+            <span className="provider-enable-label text-sm font-medium text-[var(--nim-text)]">Claude Execution Environment</span>
+            <p className="text-xs text-[var(--nim-text-muted)] mt-1">
+              Where Claude Code runs for this project. Independent of the terminal shell.
+              WSL mode requires <code className="font-mono text-[11px] bg-[var(--nim-bg-tertiary)] px-1 py-0.5 rounded">claude</code> on the Linux PATH inside the default distro.
+            </p>
+          </div>
+          <select
+            className="text-sm rounded border border-[var(--nim-border)] bg-[var(--nim-bg-secondary)] text-[var(--nim-text)] px-3 py-1.5 mt-1 self-start"
+            value={executionMode}
+            onChange={(e) => handleExecutionModeChange(e.target.value as 'inherit' | 'windows' | 'wsl')}
+            disabled={workspaceSettings.loading}
+          >
+            <option value="inherit">Default (Windows native)</option>
+            <option value="windows">Windows native</option>
+            <option value="wsl">WSL (default distro)</option>
+          </select>
+          {executionMode === 'wsl' && (
+            <p className="text-xs mt-2 px-3 py-2 rounded bg-[var(--nim-accent-subtle)] text-[var(--nim-text-muted)] leading-relaxed">
+              <strong>Experimental.</strong> Session scanning and import for WSL-backed sessions is not yet supported -- only sessions started after switching to WSL mode will appear correctly. Internal MCP servers may not be reachable across the WSL boundary; tools that depend on them (extension dev, session context) may fail until that bridge ships.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Plan Tracking Toggle */}
       <SettingsToggle

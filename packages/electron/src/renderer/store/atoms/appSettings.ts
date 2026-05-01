@@ -1417,6 +1417,16 @@ export async function initAIProviderSettings(): Promise<AIProviderSettings> {
 // ============================================================================
 
 /**
+ * Claude Code execution environment override.
+ * Mirrors the main-process schema in `packages/electron/src/main/utils/store.ts`.
+ * Object shape (rather than bare string) leaves room for future per-project distro selection.
+ */
+export interface ClaudeExecutionEnvironment {
+  mode: 'windows' | 'wsl';
+  distro?: string;
+}
+
+/**
  * Provider override for a single provider in a workspace.
  */
 export interface ProviderOverride {
@@ -1424,6 +1434,8 @@ export interface ProviderOverride {
   models?: string[];
   defaultModel?: string;
   apiKey?: string;
+  /** Claude Code execution environment (Windows-only, claude-code provider only). */
+  executionEnvironment?: ClaudeExecutionEnvironment;
 }
 
 /**
